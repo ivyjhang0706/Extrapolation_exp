@@ -1,0 +1,94 @@
+
+
+# Dennis added
+import pyarrow as pa
+import pyarrow.parquet as pq
+from concurrent.futures import ThreadPoolExecutor
+
+def load_rawdata_extract_features_multiprocess(rawdata_path, train_index_path, test_index_path, features_filepath, parquet_filename, save_txt_flag=False, test_feature_uuid_path=""):
+    
+    df_features = pd.DataFrame()
+    
+    # ----------------------------------------------------
+    # 階段 1：平行處理 Training Set (Normal, High, Low)
+    # ----------------------------------------------------
+    print("Start extracting features from training set in parallel..")
+    train_tasks = ["Normal", "Low", "High"]
+    train_results = []
+    
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        # 同時提交 3 個 Train 任務
+        futures = {
+            executor.submit(
+                concat_features_label, 
+                train_index_path, rawdata_path, bg_type, "Train", features_filepath, save_txt_flag, test_feature_uuid_path
+            ): bg_type for bg_type in train_tasks
+        }
+        
+        # 收集結果
+        for future in futures:
+            bg_type = futures[future]
+            try:
+                df_res = future.result()
+                train_results.append(df_res)
+            except Exception as e:
+                print(f"Error extracting Train - {bg_type}: {e}")
+                globals.errorcode = -1
+                
+    # 檢查 Train 階段是否有任一錯誤或全域錯誤碼
+    if globals.errorcode < 0:
+        print("Error detected during Training feature extraction. Aborting.")
+        return
+
+    # 合併 Train 的結果
+    df_train_all = pd.concat(train_results, ignore_index=True)
+    df_features = pd.concat([df_features, df_train_all], ignore_index=True)
+
+
+    # ----------------------------------------------------
+    # 階段 2：平行處理 Testing Set (Normal, High, Low)
+    # ----------------------------------------------------
+    print("Start extracting features from testing set in parallel..")
+    test_tasks = ["Low", "Normal", "High"]
+    test_results = []
+    
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        # 同時提交 3 個 Test 任務
+        futures = {
+            executor.submit(
+                concat_features_label, 
+                test_index_path, rawdata_path, bg_type, "Test", features_filepath, save_txt_flag, test_feature_uuid_path
+            ): bg_type for bg_type in test_tasks
+        }
+        
+        # 收集結果
+        for future in futures:
+            bg_type = futures[future]
+            try:
+                df_res = future.result()
+                test_results.append(df_res)
+            except Exception as e:
+                print(f"Error extracting Test - {bg_type}: {e}")
+                globals.errorcode = -1
+
+    # 檢查 Test 階段是否有任一錯誤或全域錯誤碼
+    if globals.errorcode < 0:
+        print("Error detected during Testing feature extraction. Aborting.")
+        return
+
+    # 合併 Test 的結果
+    df_test_all = pd.concat(test_results, ignore_index=True)
+    df_features = pd.concat([df_features, df_test_all], ignore_index=True)
+
+
+    # ----------------------------------------------------
+    # 階段 3：寫出檔案與回傳
+    # ----------------------------------------------------
+    if features_filepath != "":  ## 若為空，是預測血糖值時候的feature extraction 階段，不需要寫出檔案
+        saved_parquet_filepath = os.path.join(features_filepath, parquet_filename)
+        table = pa.Table.from_pandas(df_features)
+        pq.write_table(table, saved_parquet_filepath)
+        print('saved_parquet_filepath:', saved_parquet_filepath)
+
+    return df_features
+
