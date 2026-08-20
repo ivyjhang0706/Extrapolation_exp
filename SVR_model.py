@@ -5,16 +5,15 @@ import csv
 import time
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
-from SVR_expansion_exp_pre import data_preprocessing, get_ratio_bounds
+from SVR_expansion_exp_pre import data_preprocessing, get_ratio_bounds, GLUCOSE_BOUNDS, resolve_glucose_bounds
 
 # 讓 matplotlib 能正常顯示中文，避免圖上的中文字變成缺字方框
 plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'Microsoft YaHei', 'SimHei']
 plt.rcParams['axes.unicode_minus'] = False
 
 
-def svr_manual(X_all_scaled, y_all, test_data, target_data, mode='log',
-               lower_bound: float | None = None, upper_bound: float | None = None,
-               verbose: bool = True):
+def svr_manual(X_all_scaled, y_all, test_data, target_data, mode='log',lower_bound=None, upper_bound=None,
+               verbose=True):
     """
     若有傳入 lower_bound/upper_bound(訓練時實際的血糖範圍)，
     除了整體指標外，還會另外印出/回傳「內插」與「外推」誤差，
@@ -91,7 +90,7 @@ def svr_manual(X_all_scaled, y_all, test_data, target_data, mode='log',
 
     return (overall_metrics, max_glucose_value, min_glucose_value, model,
             y_pred_train, y_pred_test, intra_metrics, extra_metrics, test_clipped_mask)
-def _compute_metrics(y_pred: np.ndarray, y_true: np.ndarray) -> dict | None:
+def _compute_metrics(y_pred, y_true):
     """計算單一群組(內插或外推)的誤差指標，樣本數為 0 時回傳 None。"""
     if len(y_true) == 0:
         return None
@@ -106,7 +105,7 @@ def _compute_metrics(y_pred: np.ndarray, y_true: np.ndarray) -> dict | None:
     return {"n": len(y_true), "MSE": mse, "MARD": mard, "Bias": bias, "MAE": mae, "RMSE": rmse}
 
 
-def evaluate_intra_extra(y_pred, y_true, lower_bound: float, upper_bound: float) -> tuple[dict | None, dict | None]:
+def evaluate_intra_extra(y_pred, y_true, lower_bound, upper_bound):
     """
     依照訓練時的血糖範圍 [lower_bound, upper_bound]，把 test 樣本分成兩組分別算誤差：
         intra (內插): lower_bound <= y_true <= upper_bound（落在訓練範圍內）
@@ -153,7 +152,7 @@ def compute_metrics_by_bin(y_pred, y_true, bin_values, bin_edges: np.ndarray) ->
     return rows
 
 
-def _print_metrics(name: str, metrics: dict | None):
+def _print_metrics(name, metrics):
     if metrics is None:
         print(f"[{name}] 無樣本，略過")
         return
@@ -195,16 +194,21 @@ if __name__ == "__main__":
                     (1,'ratio of tr_amp'),(1,'ratio of st_amp')]
 
     expansion_ratio_list = [0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3]
-    uuid = "2261"
+    uuid = "2295"
     glucose_type = "Normal"
     base_dir = os.path.dirname(__file__)
-    results_dir = os.path.join(base_dir, "results", uuid)
+    results_dir = os.path.join(base_dir, "results", uuid, glucose_type)
     os.makedirs(results_dir, exist_ok=True)
     # 逐一 ratio 的散佈圖只是健檢用的診斷圖(主要結論看分箱圖就夠了)，另外放子資料夾，results_dir 才不會被塞滿
     diagnostics_dir = os.path.join(results_dir, "diagnostics")
     os.makedirs(diagnostics_dir, exist_ok=True)
 
-    # data_preprocessing(expansion_ratio_list, uuid, glucose_type) # 重新限縮訓練集(檔案已存在時不必每次重跑)
+    if glucose_type not in GLUCOSE_BOUNDS:
+        raise ValueError(f"Invalid glucose type: {glucose_type}，可選: {list(GLUCOSE_BOUNDS)}")
+    class_lower, class_upper = resolve_glucose_bounds(uuid, glucose_type, base_dir=base_dir)
+
+    # 依 ratio 限縮並複製到 dataset/EXP/.../ratio_*（已存在可註解掉，不必每次重跑）
+    data_preprocessing(expansion_ratio_list, uuid, glucose_type)
     used_feature_array = np.array([row[0] for row in used_feature_dic])
 
     # 測試集固定用完整的 Test，不隨 ratio 改變，搬到迴圈外面只讀取一次(省時間，也確保每個 ratio 用的是同一批樣本)
@@ -219,12 +223,15 @@ if __name__ == "__main__":
     bin_end = np.ceil(y_test.max() / BIN_WIDTH) * BIN_WIDTH + BIN_WIDTH
     bin_edges = np.arange(bin_start, bin_end, BIN_WIDTH)
 
-    # 固定的「離訓練邊界距離」分箱(跟 ratio 無關)：用 get_ratio_bounds 的 lower_base=85 當正規化基準，
+    # 固定的「離訓練邊界距離」分箱(跟 ratio 無關)：用 class lower 當正規化基準，
     # 距離越遠代表要求模型外推得越遠，這樣才能公平比較「不同 ratio 在同樣外推難度下的表現」，
     # 而不是像整組 Extra 平均那樣，範圍越窄的 ratio 天生就要背負更遠、更難的外推點。
-    LOWER_BASE = 85  # 需跟 get_ratio_bounds 的預設值一致
+    LOWER_BASE = class_lower
+
     DIST_BIN_WIDTH_PCT = 5
-    narrowest_lower, narrowest_upper = get_ratio_bounds(max(expansion_ratio_list))
+    narrowest_lower, narrowest_upper = get_ratio_bounds(
+        max(expansion_ratio_list), class_lower, class_upper
+    )
     max_dist = max(narrowest_lower - y_test.min(), y_test.max() - narrowest_upper, 0)
     max_dist_pct = np.ceil(max_dist / LOWER_BASE * 100 / DIST_BIN_WIDTH_PCT) * DIST_BIN_WIDTH_PCT
     dist_bin_edges = np.arange(0, max_dist_pct + DIST_BIN_WIDTH_PCT, DIST_BIN_WIDTH_PCT)
@@ -235,10 +242,10 @@ if __name__ == "__main__":
 
     for ratio in expansion_ratio_list:
         ratio_start = time.time()
-        lower_bound, upper_bound = get_ratio_bounds(ratio)
+        lower_bound, upper_bound = get_ratio_bounds(ratio, class_lower, class_upper)
         print(f"\n===== ratio={ratio:.2f} 開始 (train range=[{lower_bound}, {upper_bound}]) =====", flush=True)
 
-        # 載入訓練集(1D array)
+        # 載入訓練集(1D array)；資料夾由上方 data_preprocessing 產生
         X_train, y_train, file_list = load_features_and_labels(
             os.path.join(base_dir, "dataset", "EXP", uuid, "Train", glucose_type, f"ratio_{ratio:.2f}"),
             used_feature_array,
@@ -397,7 +404,7 @@ if __name__ == "__main__":
         color = cmap(i / max(len(expansion_ratio_list) - 1, 1))
         plt.plot(centers, maes, marker="o", color=color, label=f"ratio={ratio:.2f}")
 
-    plt.xlabel("離訓練邊界的距離 (% of lower_base=85)")
+    plt.xlabel(f"離訓練邊界的距離 (% of lower_base={LOWER_BASE})")
     plt.ylabel("MAE")
     plt.title("MAE by distance-from-boundary bin, across ratios(只看外推樣本)")
     plt.legend()
